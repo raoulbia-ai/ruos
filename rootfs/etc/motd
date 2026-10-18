@@ -1,7 +1,0 @@
-
-  ruOS — Linux with a built-in system agent
-
-  ai <request>   ask the agent (e.g. ai what is using memory?)
-  ai             interactive session with the agent
-  poweroff       shut down
-
