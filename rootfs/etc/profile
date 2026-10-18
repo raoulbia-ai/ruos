@@ -1,0 +1,4 @@
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export HOME=/root
+PS1='\u@\h:\w# '
+[ -r /etc/motd ] && cat /etc/motd

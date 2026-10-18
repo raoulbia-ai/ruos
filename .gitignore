@@ -14,3 +14,4 @@ id_rsa*
 # OS / editor
 .DS_Store
 *.swp
+/build

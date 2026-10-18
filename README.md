@@ -1,161 +1,129 @@
 # ruOS
 
-**An agentic desktop — a desktop that runs itself.** ruOS is a full Linux desktop
-with the entire [ruvnet](https://github.com/ruvnet) AI-agent stack built in: it
-acts on its own — research, writing, code, system tasks — instead of waiting for
-every click. It happens to run in the cloud and be reachable from any browser, an
-installable iPad app, or a native macOS app, but the identity is **agentic**, not
-"a cloud desktop." Nothing to install to use it; a real desktop to drive when you
-want one.
+A small Linux-based operating system with an AI agent built in as a system
+service. ruOS is built from source here: a Linux LTS kernel with our own config,
+our own PID 1, and `ruosd`, a system service that gives a model (Claude) tools
+to inspect and operate the machine, with the user approving anything that
+changes it.
 
-This repo is the public control-and-extension surface for a ruOS desktop:
+Status: first boot milestone. It boots in QEMU to a shell, and the agent works
+end to end with the offline provider. The Claude provider is implemented but
+has not been tested against the live API yet (see [Known gaps](#known-gaps)).
 
-- **[`mcp/`](./mcp/)** — the ruOS **computer-use MCP server**: screenshot,
-  keyboard/mouse, `run_shell`, `system_action`, and `desktop_resolution`. Point
-  Claude (or any MCP client) at a ruOS desktop and let it drive.
-- **[`skills/`](./skills/)** — the ruvnet-stack **skills** you run on a ruOS
-  desktop: swarm orchestration, vector memory, self-learning hooks, and the
-  RuVector memory substrate.
+> The earlier ruOS design (an agentic GNOME desktop on Ubuntu, with the
+> `mcp/` computer-use server and `skills/`) is described in
+> [docs/agentic-desktop.md](docs/agentic-desktop.md).
 
-> Served at **[ruos.cognitum.one](https://ruos.cognitum.one)** · Powered by
-> [Cognitum](https://cognitum.one).
-
----
-
-## What ruOS is
-
-ruOS is an **agentic desktop**: a full GNOME Linux desktop with the ruvnet
-AI-agent stack wired in as a first-class control plane, so agents drive the
-machine — screen, keyboard, shell, and system actions — the same way you do. It
-runs on a VM and is streamed to you over a remote-desktop transport; you reach it
-three ways, all against the same desktop:
-
-- **Browser** — a rebranded [noVNC](https://novnc.com) viewer at
-  `ruos.cognitum.one/vnc.html`. No install, any device.
-- **iPad** — an installable PWA (`ruos.cognitum.one/ipad/`); a native SwiftUI app
-  is on the roadmap.
-- **macOS** — the **ruOS Connect** app (native RustDesk-based viewer).
-
-On top of the desktop sit two control surfaces this repo documents:
-
-- The **MCP control plane** ([`mcp/`](./mcp/)) — an AI client drives the desktop
-  (pixels, keyboard, shell, system actions) over stdio-over-SSH.
-- The **skills** ([`skills/`](./skills/)) — the ruvnet stack (Ruflo + RuVector),
-  invoked from a terminal or an attached MCP client.
-
-## Architecture
+## What runs
 
 ```
-   Browser (noVNC)  ┐
-   iPad PWA         ├─►  ruos.cognitum.one  ──►  ruOS desktop VM
-   macOS Connect    ┘     (viewer front)          (GNOME on Xorg)
-                                                    │
-   Claude / MCP client ── stdio over SSH ──►  ruos-mcp  ──► xdotool / scrot / shell
-                                                    │
-                                             executor (127.0.0.1:17870)
-                                                    │  system_action, desktop_resolution
-                                             ruvnet stack (Ruflo, RuVector) ── skills
+ QEMU x86_64 (virtio-net, virtio-rng, serial console)
+ └─ Linux 6.18 LTS            kernel/ruos.config on top of x86_64_defconfig
+    └─ /init = ruos-init      PID 1: mounts, hostname, network, supervision, shutdown
+       ├─ ruosd               AI system service on /run/ruosd.sock (root only, 0600)
+       │   ├─ provider        Claude API, or offline rule-based fallback
+       │   └─ tools           run_command (needs approval), read_file, list_dir, system_info
+       └─ /bin/sh (busybox)   login shell on the console
+           └─ ai              client: sends requests to ruosd, shows approval prompts
 ```
 
-- **Viewer front** — a viewer served over HTTPS (Caddy + Let's Encrypt). Works
-  standalone (direct) today; a per-tenant OAuth + id→desktop routing tier is the
-  hosted-mode direction (see Roadmap).
-- **MCP control plane** — [`mcp/ruos-mcp`](./mcp/) exposes 16 computer-use tools.
-  Transport is **stdio over SSH**: the security boundary is who can open the SSH
-  session, not an open port.
-- **Executor** — a desktop-local server on loopback `127.0.0.1:17870` runs named
-  system actions and the resolution change; the MCP server proxies to it.
-- **Skills** — the ruvnet stack preinstalled on the desktop; see
-  [`skills/`](./skills/).
+- **ruos-init** (`userland/src/bin/ruos-init.rs`) mounts `/proc`, `/sys`,
+  `/dev`, `/run`, `/tmp`, configures QEMU user networking (10.0.2.15, gateway
+  10.0.2.2, DNS 10.0.2.3), starts `ruosd` and the console shell, restarts
+  either if it exits, reaps orphans, and handles `poweroff`/`reboot`/`halt`.
+- **ruosd** (`userland/src/bin/ruosd.rs`, `userland/src/agent.rs`) runs the
+  tool-use loop. Each connection has its own conversation. Read-only tools run
+  without asking; `run_command` asks the user every time. Every tool call and
+  approval decision is appended to `/var/log/ruos-audit.log`; service logs go to
+  `/var/log/ruosd.log`.
+- **ai** (`userland/src/bin/ai.rs`): `ai <request>` for one request, `ai` for
+  an interactive session (`/reset` clears history).
 
-## OS
+## Build and run
 
-ruOS is an **agentic desktop**, not merely a remote/cloud desktop: the base is a
-conventional Linux desktop, and what makes it ruOS is the ruvnet AI-agent stack
-and MCP control plane layered on top so the machine acts on its own. The hosting
-below is an implementation detail of *where* it runs, not the product identity.
-
-| Aspect | Detail |
-|--------|--------|
-| **Base** | Ubuntu 24.04 LTS (`ubuntu-2404-lts-amd64`) on a GCP Compute Engine VM |
-| **Desktop** | GNOME on Xorg, with `xf86-video-dummy` (virtual display `DUMMY0` — no physical GPU/framebuffer on a GCE instance) |
-| **Transport** | RustDesk (native/macOS) and x11vnc→noVNC (browser); server-side resolution via `xrandr` |
-| **Stack** | ruvnet AI stack — Ruflo (`@claude-flow/cli`) + RuVector (`ruvector`), plus the `ruos-mcp` computer-use server |
-| **Region** | GCP `northamerica-northeast2` (Toronto) — chosen for low interactive-streaming latency |
-
-### Tiers (cpu / gpu)
-
-One machine-profile variable selects the tier (ADR-009 of `ruos-desktop`):
-
-| Tier | Machine | Encode | Notes |
-|------|---------|--------|-------|
-| **cpu** (default) | `e2-standard-4` (4 vCPU / 16 GB) | Software VP9 | Cost-sensitive; BBR/fq + tuned buffers, animations off |
-| **gpu** (opt-in) | `g2-standard-4` (+ NVIDIA L4) | Hardware NVENC H.264/H.265 | ~6× the cpu cost; GPU also free for local inference |
-
-A scheduled stop/start (weekday 07:00–23:00, Toronto) keeps the cpu tier around
-~$50/mo (ADR-002). Flipping tiers is an in-place machine-type change, not a rebuild.
-
-### Multi-tenant
-
-The **direction** is a multi-tenant hosted SaaS: sign up, get your own private
-ruOS desktop, reach it from any device. That model is **not fully shipped** —
-today a desktop runs in single-operator mode; per-tenant OAuth (Cognitum OIDC),
-id→desktop routing, signup capture, and usage metering are on the roadmap. The
-viewer is designed so hosted auth is a **wrapping tier that can be enabled or
-disabled**, never baked into the core viewer.
-
-## Quickstart
+Needs: `make`, a C toolchain, `flex`, `bison`, `bc`, `libelf-dev`,
+`libssl-dev`, `cpio`, `curl`, Rust with the `x86_64-unknown-linux-musl` target,
+`musl-tools`, a static busybox (`busybox-static` on Debian/Ubuntu, at
+`/bin/busybox`), and `qemu-system-x86`.
 
 ```bash
-# 1. Build the MCP server (see mcp/README.md for musl + deploy notes)
-cd mcp && cargo build --release      # → target/release/ruos-mcp
-
-# 2. Point Claude Code at a ruOS desktop (stdio over SSH)
-claude mcp add ruos -- ssh you@your-ruos-desktop \
-  'DISPLAY=:0 XAUTHORITY=/run/user/1000/gdm/Xauthority /usr/local/bin/ruos-mcp'
-
-# 3. Wire the ruvnet skills into the session
-claude mcp add claude-flow -- npx -y @claude-flow/cli@latest
+rustup target add x86_64-unknown-linux-musl
+make            # downloads + verifies the kernel tarball, builds kernel and initramfs into build/
+make run        # boots on this terminal; Ctrl-A X quits QEMU
+make test       # unit tests + scripted boot test (no API key needed)
 ```
 
-Then ask Claude to screenshot the desktop, run a shell command, or spin up a
-Ruflo swarm. See [`mcp/README.md`](./mcp/README.md) and
-[`skills/README.md`](./skills/README.md) for the full surface.
+Without an API key, `ruosd` uses the offline provider, which understands
+`list files [path]`, `system info`, `read <path>`, and `run <command>`.
 
-## Real vs roadmap
+To use Claude, put settings in a file outside the repo and pass it at boot. The
+file is handed to the guest through QEMU `fw_cfg`; it is not written into the
+image.
 
-**Real, today**
+```bash
+cat > ~/ruos.env <<'EOF'
+ANTHROPIC_API_KEY=sk-ant-...
+# RUOS_MODEL=claude-opus-5-5
+# RUOS_EFFORT=medium
+EOF
+make run CONFIG=~/ruos.env
+```
 
-- The `ruos-mcp` server (16 tools) — builds, handshakes, and drives a desktop
-  over stdio-over-SSH.
-- The browser noVNC viewer, iPad PWA, and macOS Connect app against a live
-  desktop.
-- The ruvnet skills (`@claude-flow/cli`, `ruvector`) via `npx`.
-- cpu / gpu machine tiers.
+Then, at the ruOS prompt:
 
-**Roadmap**
+```
+root@ruos:~# ai what is using the most memory?
+root@ruos:~# ai create a file /root/notes.txt with today's date
+ruosd wants to run: date > /root/notes.txt
+  reason: Write today's date to the file you asked for.
+  allow? [y/N]
+```
 
-- `desktop_resolution` needs the ADR-022 executor endpoint (branch
-  `feat/resolution-api`; ADR is *Proposed*).
-- Multi-tenant hosted mode: Cognitum OAuth, id→desktop routing, signup backend,
-  usage metering.
-- A hosted MCP gateway (reach a desktop's MCP without an SSH account).
-- A native iPad (SwiftUI) app and an in-desktop skills gallery.
+## Settings
+
+`ruosd` reads `KEY=VALUE` settings from `/etc/ruos/ruosd.conf` (in the image),
+then the fw_cfg file, then its environment; later sources win.
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `ANTHROPIC_API_KEY` | none | Claude API key. If set, the Claude provider is used. |
+| `RUOS_PROVIDER` | `anthropic` if a key is set, else `offline` | Force a provider. |
+| `RUOS_MODEL` | `claude-opus-5-5` | Model ID. |
+| `RUOS_EFFORT` | `medium` | `low` / `medium` / `high` / `xhigh` / `max`. |
+| `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | API endpoint. |
+| `HTTPS_PROXY` | none | HTTP proxy for API traffic. |
+
+Requests use adaptive thinking (the model default), `fallbacks: "default"` so
+a safety decline is retried on Anthropic's recommended fallback model, and
+prompt caching. A refusal or a cut-off response is reported and that request is
+dropped from the conversation, so later requests still work.
 
 ## Repository layout
 
 ```
-ruos/
-├── mcp/            # ruos-mcp — the computer-use MCP server (Rust)
-│   ├── src/main.rs
-│   ├── Cargo.toml
-│   └── README.md   # tool list, JSON-RPC/stdio usage, client setup
-├── skills/         # ruvnet-stack skills as SKILL.md descriptors
-│   ├── ruflo-swarm/   ruflo-memory/   ruflo-hooks/   ruvector/
-│   └── README.md
-├── LICENSE         # MIT
-└── README.md
+kernel/       ruos.config (config fragment), VERSION (pinned version + sha256)
+userland/     Rust: ruos-init, ruosd, ai, and the shared library they use
+rootfs/       files copied into the root filesystem (/etc)
+tools/        mkinitramfs.sh, run-qemu.sh, boot-test.py
+docs/         earlier agentic-desktop design
+mcp/, skills/ earlier agentic-desktop components
 ```
+
+## Known gaps
+
+- **Claude provider not tested live.** The request shape is unit-tested, but
+  no request has been sent from a booted VM to the real API yet. TLS uses the
+  built-in Mozilla root set (`webpki-roots`), so a TLS-intercepting proxy will
+  fail certificate checks.
+- **Everything runs as root**, including tool commands. There is no user
+  separation or sandbox yet. The kernel has Landlock, seccomp and user
+  namespaces enabled so `run_command` can be confined next.
+- **No persistent storage**: the root filesystem is an initramfs in RAM; all
+  changes are lost at power off.
+- **Busybox comes from the build host**, not built from source.
+- **Network is static** and assumes QEMU user networking. No DHCP.
+- **No streaming**: the agent's answer appears when the model's turn completes.
+- **Only x86_64 under QEMU** has been tested. No real hardware.
 
 ## License
 
